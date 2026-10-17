@@ -16,6 +16,11 @@ ARG ENABLE_srf_ARG
 ARG ENABLE_nosnap_ARG
 ARG ENABLE_systemd257_ARG
 ARG USERNAME
+ARG ENABLE_o3_mali_ARG=false
+ARG O3_MESA_VERSION_ARG=pinned
+ARG O3_VERIFY_SHA256_ARG=true
+ARG ENABLE_sshd_ARG=false
+ARG SSH_PUBLIC_KEY_ARG=""
 ######################################################
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -48,6 +53,9 @@ COPY scripts/tui/droidspaces-tui.sh /usr/local/bin/droidspaces-tui
 COPY scripts/install-desktop.sh /usr/local/sbin/install-desktop
 COPY scripts/configure-desktop.sh /usr/local/sbin/configure-desktop
 COPY scripts/configure-chrome.sh /usr/local/sbin/configure-chrome
+COPY scripts/install-manet-o3.sh /usr/local/sbin/install-manet-o3
+COPY scripts/configure-ssh.sh /usr/local/sbin/configure-ssh
+RUN chmod +x /usr/local/sbin/install-manet-o3 /usr/local/sbin/configure-ssh
 COPY scripts/start-desktop-session.sh /usr/local/bin/start-desktop-session
 COPY scripts/desktops/ /usr/local/lib/droidspaces/desktops/
 COPY scripts/etc/wireplumber/wireplumber.conf.d/Anland-Audio.conf /tmp/Anland-Audio.conf
@@ -193,6 +201,20 @@ RUN if [ "$ENABLE_mesa_ARG" = "true" ]; then \
 
 # 安装并配置原生 ARM64 Google Chrome。
 RUN /usr/local/sbin/configure-chrome "$DESKTOP" "$DISPLAY_BACKEND"
+
+# 玄戒 O3 / Mali GPU 支持（mesa-manet PanVK/Zink，与高通 Mesa 互斥）
+RUN set -e; \
+    if [ "$ENABLE_o3_mali_ARG" = "true" ]; then \
+        VERIFY_FLAG=""; \
+        if [ "$O3_VERIFY_SHA256_ARG" != "true" ]; then VERIFY_FLAG="--no-verify"; fi; \
+        /usr/local/sbin/install-manet-o3 --1 -V "$O3_MESA_VERSION_ARG" $VERIFY_FLAG; \
+    else \
+        echo "--> [跳过] 未开启玄戒 O3/Mali GPU 支持"; \
+    fi
+
+# SSH 服务配置（可选：启用 sshd、允许密码登录、注入公钥）
+RUN /usr/local/sbin/configure-ssh "$USERNAME" "$ENABLE_sshd_ARG" "$SSH_PUBLIC_KEY_ARG"
+
 
 # 修复容器内的 DHCP 网络服务配置
 RUN mkdir -p /etc/systemd/network && \
@@ -388,6 +410,7 @@ RUN if [ "$ENABLE_systemd257_ARG" = "true" ]; then \
 # 打包前删除仅用于构建的一次性脚本；TUI 和运行时脚本保留。
 RUN rm -f \
         /usr/local/sbin/configure-chrome \
+        /usr/local/sbin/configure-ssh \
         /usr/local/sbin/configure-desktop \
         /usr/local/sbin/install-desktop \
         /usr/local/sbin/install-anland-desktop \

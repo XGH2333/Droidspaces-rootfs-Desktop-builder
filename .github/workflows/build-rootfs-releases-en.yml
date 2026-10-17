@@ -75,6 +75,34 @@ on:
         required: true
         type: boolean
         default: false
+      enable_o3_mali:
+        description: Xring O3/Mali GPU support (mesa-manet; conflicts with Qualcomm Mesa; Debian 13/Ubuntu 24-26 only)
+        required: true
+        type: boolean
+        default: false
+      o3_mesa_version:
+        description: manet version (pinned=v1.0, latest=newest release)
+        required: true
+        type: choice
+        default: pinned
+        options:
+          - pinned
+          - latest
+      o3_verify_sha256:
+        description: Verify the manet package SHA256 (latest mode reads release SHA256SUMS)
+        required: true
+        type: boolean
+        default: true
+      enable_sshd:
+        description: Enable sshd and allow password login
+        required: true
+        type: boolean
+        default: false
+      ssh_public_key:
+        description: SSH public key (optional, comma-separated; enables sshd automatically)
+        required: false
+        type: string
+        default: '' 
       nosnap:
         description: Remove Ubuntu Snap
         required: true
@@ -139,6 +167,11 @@ jobs:
       enable_zh_tz: ${{ inputs.enable_zh_tz }}
       enable_mesa: ${{ inputs.enable_mesa }}
       enable_8gen2_wayland: ${{ inputs.enable_8gen2_wayland }}
+      enable_o3_mali: ${{ inputs.enable_o3_mali }}
+      o3_mesa_version: ${{ inputs.o3_mesa_version }}
+      o3_verify_sha256: ${{ inputs.o3_verify_sha256 }}
+      enable_sshd: ${{ inputs.enable_sshd }}
+      ssh_public_key: ${{ inputs.ssh_public_key }}
       nosnap: ${{ inputs.nosnap }}
       enable_systemd257: ${{ inputs.enable_systemd257 }}
       enable_srf: ${{ inputs.enable_srf }}

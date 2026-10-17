@@ -11,9 +11,14 @@ DESKTOP_AUTOSTART="false"
 ENABLE_nosnap="false"
 ENABLE_8gen2_wayland="false"
 ENABLE_systemd257="false"
+ENABLE_o3_mali="false"
+O3_MESA_VERSION="pinned"
+O3_VERIFY_SHA256="true"
+ENABLE_sshd="false"
+SSH_PUBLIC_KEY=""
 DISPLAY_BACKEND_INPUT="X11"
 # 解析输入参数 (-i 指定 Dockerfile，-v 指定版本号)
-while getopts "i:v:K:L:B:P:a:b:c:d:e:f:g:h:n:S:t:u:A:" opt; do
+while getopts "i:v:K:L:B:P:a:b:c:d:e:f:g:h:n:S:t:u:A:M:R:C:E:U:" opt; do
   case $opt in
     i) DOCKERFILE="$OPTARG" ;; # -i 参数赋值给 DOCKERFILE 变量
     v) VERSION="$OPTARG" ;;    # -v 参数赋值给 VERSION 变量
@@ -34,6 +39,11 @@ while getopts "i:v:K:L:B:P:a:b:c:d:e:f:g:h:n:S:t:u:A:" opt; do
     t) ENABLE_8gen2_wayland="$OPTARG" ;; # 修复骁龙8 Gen 2 Wayland 花屏
     u) USERNAME="$OPTARG" ;; # 自定义用户名
     A) LEGACY_ANLAND_INPUT="$OPTARG" ;; # 兼容旧参数
+    M) ENABLE_o3_mali="$OPTARG" ;; # 玄戒 O3/Mali GPU 支持
+    R) O3_MESA_VERSION="$OPTARG" ;; # manet 版本模式 pinned|latest
+    C) O3_VERIFY_SHA256="$OPTARG" ;; # manet SHA256 校验开关
+    E) ENABLE_sshd="$OPTARG" ;; # 启用 sshd 并允许密码登录
+    U) SSH_PUBLIC_KEY="$OPTARG" ;; # 追加 SSH 公钥
     *) echo "用法: $0 -i <template.Dockerfile> -K <none|KDE|'KDE mobile'|GNOME> [-B <x11|anland-wayland>]" ; exit 1 ;;
   esac
 done
@@ -80,6 +90,21 @@ case "$ENABLE_systemd257" in
   *) echo "错误：-S 只支持 true 或 false。" >&2; exit 1 ;;
 esac
 
+case "$ENABLE_o3_mali" in true|false) ;; *) echo "错误：-M 只支持 true 或 false。" >&2; exit 1 ;; esac
+case "$O3_VERIFY_SHA256" in true|false) ;; *) echo "错误：-C 只支持 true 或 false。" >&2; exit 1 ;; esac
+case "$O3_MESA_VERSION" in pinned|latest) ;; *) echo "错误：-R 只支持 pinned 或 latest。" >&2; exit 1 ;; esac
+case "$ENABLE_sshd" in true|false) ;; *) echo "错误：-E 只支持 true 或 false。" >&2; exit 1 ;; esac
+
+# 玄戒 O3/Mali 与高通 Mesa 互斥
+if [[ "$ENABLE_o3_mali" == true && "$ENABLE_mesa" == true ]]; then
+  echo "错误：玄戒 O3/Mali GPU 支持（-M）与高通 Mesa 支持（-c）互斥，请只开启其一。" >&2
+  exit 1
+fi
+if [[ "$ENABLE_o3_mali" == true && "$ENABLE_8gen2_wayland" == true ]]; then
+  echo "错误：玄戒 O3/Mali GPU 支持（-M）与骁龙 8 Gen 2 Wayland 修复（-t）互斥（后者是高通专用参数）。" >&2
+  exit 1
+fi
+
 if [[ "$DESKTOP" == kde-mobile || "$DESKTOP" == gnome || "$DESKTOP" == anland-next || \
       "$DESKTOP" == niri || "$DESKTOP" == hyprland || "$DESKTOP" == mango || "$DESKTOP" == denial ]]; then
   DISPLAY_BACKEND="anland-wayland"
@@ -104,6 +129,16 @@ fi
 # 提取发行版目标名称（例如：Debian-13.Dockerfile -> Debian-13）
 PREFIX="$(basename "${DOCKERFILE%.Dockerfile}")"
 
+if [[ "$ENABLE_o3_mali" == true ]]; then
+  case "$PREFIX" in
+    Debian-13|Ubuntu-24|Ubuntu-25|Ubuntu-26) ;;
+    *)
+      echo "错误：玄戒 O3/Mali GPU 支持仅提供 Debian/Ubuntu deb 包，请将 -i 指定为 Debian-13 或 Ubuntu-24/25/26。" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 if ! desktop_target_supported "$PREFIX" "$DESKTOP"; then
   echo "错误：$PREFIX 不支持桌面 $DESKTOP。" >&2
   exit 1
@@ -126,6 +161,8 @@ echo " 容器识别部分硬件和网络：$ENABLE_yj"
 echo " Ubuntu nosnap：$ENABLE_nosnap"
 echo " systemd 257 旧内核兼容：$ENABLE_systemd257"
 echo " 修复骁龙8 Gen 2 Wayland 花屏：$ENABLE_8gen2_wayland"
+echo " 玄戒 O3/Mali GPU 支持：$ENABLE_o3_mali（manet 版本：$O3_MESA_VERSION，SHA256 校验：$O3_VERIFY_SHA256）"
+echo " 启用 sshd 并允许密码登录：$ENABLE_sshd$( [[ -n "$SSH_PUBLIC_KEY" ]] && echo '（含公钥）' )"
 echo " 桌面：$DESKTOP"
 echo " 显示后端：$DISPLAY_BACKEND"
 echo " 桌面自启动：$DESKTOP_AUTOSTART"
@@ -194,6 +231,11 @@ docker buildx build \
   --build-arg ENABLE_nosnap_ARG="$ENABLE_nosnap" \
   --build-arg ENABLE_systemd257_ARG="$ENABLE_systemd257" \
   --build-arg ENABLE_8gen2_wayland_ARG="$ENABLE_8gen2_wayland" \
+  --build-arg ENABLE_o3_mali_ARG="$ENABLE_o3_mali" \
+  --build-arg O3_MESA_VERSION_ARG="$O3_MESA_VERSION" \
+  --build-arg O3_VERIFY_SHA256_ARG="$O3_VERIFY_SHA256" \
+  --build-arg ENABLE_sshd_ARG="$ENABLE_sshd" \
+  --build-arg SSH_PUBLIC_KEY_ARG="$SSH_PUBLIC_KEY" \
   --build-arg ANLAND_RELEASE_REPOSITORY="$ANLAND_RELEASE_REPOSITORY" \
   --build-arg ANLAND_PACKAGE_REVISION="$ANLAND_PACKAGE_REVISION" \
   --build-arg USERNAME="$USERNAME" \
@@ -205,8 +247,12 @@ docker buildx build \
 
 
 echo "正在写入推荐配置并压缩构建产物..."
+GPU_RECOMMENDED="${ENABLE_mesa:-false}"
+if [[ "$ENABLE_o3_mali" == true ]]; then
+  GPU_RECOMMENDED="true"
+fi
 package_rootfs_with_config "$TEMP_TAR" "$FINAL_NAME" "$DESKTOP" "$DISPLAY_BACKEND" \
-  "${PulseAudio:-none}" "${ENABLE_docker:-false}" "${ENABLE_mesa:-false}" "${ENABLE_zh_tz:-false}"
+  "${PulseAudio:-none}" "${ENABLE_docker:-false}" "$GPU_RECOMMENDED" "${ENABLE_zh_tz:-false}"
 
 echo "========================================================="
 echo " 恭喜！构建成功完成: $FINAL_NAME"

@@ -75,6 +75,34 @@ on:
         required: true
         type: boolean
         default: false
+      enable_o3_mali:
+        description: 玄戒 O3/Mali GPU 支持（mesa-manet，与高通 Mesa 互斥，仅 Debian 13/Ubuntu 24-26）
+        required: true
+        type: boolean
+        default: false
+      o3_mesa_version:
+        description: manet 版本（pinned=固定 v1.0，latest=最新 release）
+        required: true
+        type: choice
+        default: pinned
+        options:
+          - pinned
+          - latest
+      o3_verify_sha256:
+        description: 校验 manet 包 SHA256（latest 模式从 release 的 SHA256SUMS 读取）
+        required: true
+        type: boolean
+        default: true
+      enable_sshd:
+        description: 启用 sshd 并允许密码登录
+        required: true
+        type: boolean
+        default: false
+      ssh_public_key:
+        description: SSH 公钥（可选，逗号分隔多个；填写后自动启用 sshd）
+        required: false
+        type: string
+        default: '' 
       nosnap:
         description: 移除 Ubuntu Snap
         required: true
@@ -139,6 +167,11 @@ jobs:
       enable_zh_tz: ${{ inputs.enable_zh_tz }}
       enable_mesa: ${{ inputs.enable_mesa }}
       enable_8gen2_wayland: ${{ inputs.enable_8gen2_wayland }}
+      enable_o3_mali: ${{ inputs.enable_o3_mali }}
+      o3_mesa_version: ${{ inputs.o3_mesa_version }}
+      o3_verify_sha256: ${{ inputs.o3_verify_sha256 }}
+      enable_sshd: ${{ inputs.enable_sshd }}
+      ssh_public_key: ${{ inputs.ssh_public_key }}
       nosnap: ${{ inputs.nosnap }}
       enable_systemd257: ${{ inputs.enable_systemd257 }}
       enable_srf: ${{ inputs.enable_srf }}

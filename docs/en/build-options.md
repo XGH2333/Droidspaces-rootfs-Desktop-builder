@@ -40,6 +40,11 @@ Choose the target, desktop, display backend, and optional features on the GitHub
 | `enable_zh_tz` | `true` / `false` | Installs Chinese locale and Shanghai timezone; defaults differ by workflow. |
 | `enable_mesa` | `true` / `false`; default `true` | Adds Snapdragon GPU/Mesa support. |
 | `enable_8gen2_wayland` | `true` / `false`; default `false` | Sets the Turnip UBWC Wayland workaround for relevant devices. |
+| `enable_o3_mali` | `true` / `false`; default `false` | Xring O3 / Arm Mali GPU support (mesa-manet PanVK/Zink). Debian 13 and Ubuntu 24/25/26 only; requires the `anland-wayland` display backend. |
+| `o3_mesa_version` | `pinned` / `latest`; default `pinned` | manet version: `pinned` pins v1.0 (device-verified); `latest` fetches the newest [mesa-manet](https://github.com/DsoTsin/mesa-manet) release. |
+| `o3_verify_sha256` | `true` / `false`; default `true` | Verify the manet package SHA256. `pinned` uses the built-in digest; `latest` reads the release `SHA256SUMS`. Disable only when debugging download issues. |
+| `enable_sshd` | `true` / `false`; default `false` | Enable the sshd service and allow password login (Debian/Fedora do not enable sshd by default). |
+| `ssh_public_key` | SSH public key string; default empty | Public key appended to the normal user's `authorized_keys` (comma-separated for multiple keys). Supplying a key enables sshd automatically. |
 | `nosnap` | `true` / `false` | Ubuntu only: removes Snap and prevents APT from reinstalling it; defaults differ by workflow. |
 | `enable_systemd257` | `true` / `false`; default `false` | Tries the systemd 257 package family for old Android kernels; only `none` and standard `KDE` are supported. |
 | `enable_srf` | `true` / `false` | Installs Fcitx5; enabled by default in the Chinese workflow, disabled in English. |
@@ -76,3 +81,47 @@ not passed through this recommendation file. On kernels without user namespaces,
 the requested KDE setting stays checked but disabled; this does not add kernel support.
 
 Run the mapping and archive checks with `python3 -m unittest discover -s tests -v`.
+
+## Xring O3 / Mali GPU support (enable_o3_mali)
+
+This option installs [mesa-manet](https://github.com/DsoTsin/mesa-manet) (PanVK/Zink), giving the Xring O3 SoC (Mali-G2-Ultra NX, kbase interface via `/dev/mali0`) Vulkan 1.4 and OpenGL (through Zink) acceleration inside the container. Verified on a Xiaomi Pad 9 Pro Max: `vulkaninfo` enumerates the Mali-G2-Ultra MC16, and Chrome's WebGL path renders through ANGLE(Vulkan) with real rasterization.
+
+### Conflicts and limits
+
+| Combination | Result |
+| --- | --- |
+| `enable_o3_mali` x `enable_mesa` (Qualcomm) | **Mutually exclusive**; the build fails. They write incompatible GPU environment variables (zink vs kgsl). |
+| `enable_o3_mali` x `enable_8gen2_wayland` | **Mutually exclusive**; the build fails (the latter is Qualcomm Turnip-only). |
+| `enable_o3_mali` x Fedora/Arch/`all`/`all-wayland` | **Unsupported**; the build fails. manet ships Debian/Ubuntu .deb packages only. |
+| `enable_o3_mali` x `display_backend=x11` | **Unsupported**. `anland-wayland` is required (the Chrome wrapper and Wayland path are what was validated). |
+| `enable_o3_mali` x `enable_binfmt` | Compatible. The installer disables non-manet ICDs to avoid clashing with the amd64 Mesa packages. |
+
+### Known limits
+
+- **No hardware video decode**: this Mali driver has no VA-API and the container has no V4L2 decode node, so browser video decodes in software (the O3's performance cores usually cope; play hard-decoded video on the Android side instead).
+- **No GPU OpenCL**: a kernel DRM render node is required (the current kbase driver does not expose one). `RUSTICL_ENABLE=zink,llvmpipe` is preconfigured, so the OpenCL platform works on CPU (llvmpipe).
+- A `CS_QUEUE_GROUP_CREATE ... ENOTTY` warning may appear on the first `vulkaninfo` run: the kbase ioctl numbers differ slightly from what manet expects, so it falls back gracefully; rendering is unaffected.
+
+### Droidspaces container options required for this RootFS
+
+| Droidspaces option | Requirement |
+| --- | --- |
+| **GPU Access** (`enable_gpu_mode`) | **Required**. The recommended config already writes `enable_gpu_mode=1`; verify it when importing manually. The Mali node `/dev/mali0` depends on it. |
+| **Anland Display** (`enable_anland`) | **Required** (the recommended config writes `enable_anland=1` when the build used anland-wayland). |
+| Configure Termux:X11 (`enable_termux_x11`) | Keep off. Conflicts with Anland. |
+| Configure VirGL (`enable_virgl`) | Keep off. The native driver is used instead; VirGL would bypass the GPU. |
+| Allow user namespaces (`allow_userns`) | Recommended for KDE (the recommended config enables it automatically for KDE desktops). |
+
+### Version and verification sub-options
+
+- `o3_mesa_version=pinned` (default): installs the fixed v1.0 (`manet-a2a7103fc7f.deb` with a built-in SHA256).
+- `o3_mesa_version=latest`: fetches the newest mesa-manet release through the GitHub API.
+- `o3_verify_sha256=false`: skips SHA256 verification (not recommended).
+
+The rootfs keeps `/usr/local/sbin/install-manet-o3` as a runtime tool, so you can reinstall or upgrade inside the container (`install-manet-o3 -V latest`, `install-manet-o3 --uninstall`).
+
+## SSH options (enable_sshd / ssh_public_key)
+
+- `enable_sshd=true`: enables the sshd service and allows password login. The normal user password defaults to `1234` (see `custom_username`).
+- `ssh_public_key`: fills in the key, enables sshd automatically and appends the key to the normal user's `~/.ssh/authorized_keys` (comma-separated for multiple keys).
+- Configure a **port forward** (e.g. `22:22/tcp`) in the Droidspaces app container settings to SSH into the container from your LAN.

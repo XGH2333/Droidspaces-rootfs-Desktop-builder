@@ -32,6 +32,26 @@ on:
       enable_mesa:
         required: true
         type: boolean
+      enable_o3_mali:
+        required: false
+        type: boolean
+        default: false
+      o3_mesa_version:
+        required: false
+        type: string
+        default: pinned
+      o3_verify_sha256:
+        required: false
+        type: boolean
+        default: true
+      enable_sshd:
+        required: false
+        type: boolean
+        default: false
+      ssh_public_key:
+        required: false
+        type: string
+        default: ''
       enable_8gen2_wayland:
         required: true
         type: boolean
@@ -160,6 +180,45 @@ jobs:
                 DESKTOP_AUTOSTART="false"
                 ;;
             esac
+          fi
+
+          ENABLE_O3MALI="${{ inputs.enable_o3_mali }}"
+          O3_VERSION_MODE="${{ inputs.o3_mesa_version }}"
+          ENABLE_SSHD="${{ inputs.enable_sshd }}"
+          SSH_PUBKEY="${{ inputs.ssh_public_key }}"
+
+          # 玄戒 O3/Mali 与高通 Mesa 互斥校验
+          if [ "$ENABLE_O3MALI" = "true" ] && [ "${{ inputs.enable_mesa }}" = "true" ]; then
+            fail "玄戒 O3/Mali GPU 支持与高通 Mesa 支持互斥，请只开启其一。" \
+              "Xring O3/Mali GPU support is mutually exclusive with Qualcomm Mesa support; enable only one."
+          fi
+          if [ "$ENABLE_O3MALI" = "true" ] && [ "${{ inputs.enable_8gen2_wayland }}" = "true" ]; then
+            fail "玄戒 O3/Mali GPU 支持与骁龙 8 Gen 2 Wayland 修复互斥（后者是高通专用）。" \
+              "Xring O3/Mali GPU support conflicts with the Snapdragon 8 Gen 2 Wayland fix (Qualcomm-only)."
+          fi
+          if [ "$ENABLE_O3MALI" = "true" ]; then
+            case "$O3_VERSION_MODE" in
+              pinned|latest) ;;
+              *) fail "manet 版本模式必须是 pinned 或 latest。"                    "The manet version mode must be pinned or latest." ;;
+            esac
+            # manet 仅提供 Debian/Ubuntu deb；all/all-wayland 含 Fedora/Arch，直接拒绝
+            case "$TARGET" in
+              Debian-13|Ubuntu-24|Ubuntu-25|Ubuntu-26) ;;
+              *)
+                fail "玄戒 O3/Mali GPU 支持仅支持 Debian 13 与 Ubuntu 24/25/26，请将构建目标改为其中之一。"                   "Xring O3/Mali GPU support is available for Debian 13 and Ubuntu 24/25/26 only; pick one of those targets."
+                ;;
+            esac
+          fi
+          # SSH 公钥基本格式校验（允许多个 key，逗号分隔）
+          if [ -n "$SSH_PUBKEY" ]; then
+            IFS=',' read -ra _keys <<< "$SSH_PUBKEY"
+            for _key in "${_keys[@]}"; do
+              _key="$(echo "$_key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+              [ -z "$_key" ] && continue
+              if ! echo "$_key" | grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/=]+( .*)?$'; then
+                fail "SSH 公钥格式无效：$_key" "Invalid SSH public key: $_key"
+              fi
+            done
           fi
 
           if [[ ! "$WAYLAND_PACKAGE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
@@ -291,6 +350,11 @@ jobs:
             -n "${{ inputs.nosnap }}" \
             -S "${{ inputs.enable_systemd257 }}" \
             -t "${{ inputs.enable_8gen2_wayland }}" \
+            -M "${{ inputs.enable_o3_mali }}" \
+            -R "${{ inputs.o3_mesa_version }}" \
+            -C "${{ inputs.o3_verify_sha256 }}" \
+            -E "${{ inputs.enable_sshd }}" \
+            -U "${{ inputs.ssh_public_key }}" \
             -u "$CUSTOM_USERNAME"
 
       - name: ${{ inputs.ui_language == 'zh' && '上传构建产物' || 'Upload build artifacts' }}
@@ -343,6 +407,11 @@ jobs:
           ENABLE_SYSTEMD257: ${{ inputs.enable_systemd257 }}
           ENABLE_ZH_TZ: ${{ inputs.enable_zh_tz }}
           ENABLE_MESA: ${{ inputs.enable_mesa }}
+          ENABLE_O3MALI: ${{ inputs.enable_o3_mali }}
+          O3_VERSION_MODE: ${{ inputs.o3_mesa_version }}
+          O3_VERIFY: ${{ inputs.o3_verify_sha256 }}
+          ENABLE_SSHD: ${{ inputs.enable_sshd }}
+          SSH_PUBKEY: ${{ inputs.ssh_public_key }}
           ENABLE_8GEN2_WAYLAND: ${{ inputs.enable_8gen2_wayland }}
           ENABLE_FCITX5: ${{ inputs.enable_srf }}
           ENABLE_BINFMT: ${{ inputs.enable_binfmt }}
@@ -371,6 +440,8 @@ jobs:
           - systemd 257 旧内核兼容：$ENABLE_SYSTEMD257
           - 使用中文并设置上海时区：$ENABLE_ZH_TZ
           - 高通骁龙 GPU 支持：$ENABLE_MESA
+          - 玄戒 O3/Mali GPU 支持（mesa-manet）：$ENABLE_O3MALI（版本模式：$O3_VERSION_MODE，SHA256 校验：$O3_VERIFY）
+          - SSH 服务与密码登录：$ENABLE_SSHD$([ -n "$SSH_PUBKEY" ] && echo "（已注入公钥）")
           - 修复骁龙 8 Gen 2 Wayland 显示异常：$ENABLE_8GEN2_WAYLAND
           - Fcitx 5 输入法支持：$ENABLE_FCITX5
           - 跨架构支持：$ENABLE_BINFMT
@@ -398,6 +469,8 @@ jobs:
           - systemd 257 old-kernel compatibility: $ENABLE_SYSTEMD257
           - Use Chinese as Primary Language: $ENABLE_ZH_TZ
           - Qualcomm Snapdragon GPU Support: $ENABLE_MESA
+          - Xring O3/Mali GPU Support (mesa-manet): $ENABLE_O3MALI (version mode: $O3_VERSION_MODE, SHA256 verification: $O3_VERIFY)
+          - SSH service and password login: $ENABLE_SSHD$([ -n "$SSH_PUBKEY" ] && echo " (public key injected)")
           - Fix Snapdragon 8 Gen 2 Wayland display corruption: $ENABLE_8GEN2_WAYLAND
           - Input Method Fcitx 5 Support: $ENABLE_FCITX5
           - Cross-architecture Support: $ENABLE_BINFMT
