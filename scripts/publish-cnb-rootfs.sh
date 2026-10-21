@@ -33,10 +33,11 @@ cnb_request() {
     local url="$2"
     local expected_statuses="$3"
     local body_file="${4:-}"
+    local output_file="${5:-$response_file}"
     local -a curl_arguments=(
         --silent
         --show-error
-        --output "$response_file"
+        --output "$output_file"
         --write-out '%{http_code}'
         --request "$method"
         --header "$auth_header"
@@ -58,17 +59,18 @@ cnb_request() {
         *",$http_status,"*) ;;
         *)
             echo "CNB API 请求失败：$method $url（HTTP $http_status）" >&2
-            jq . "$response_file" 2>/dev/null || sed -n '1,80p' "$response_file" >&2
+            jq . "$output_file" 2>/dev/null || sed -n '1,80p' "$output_file" >&2
             exit 1
             ;;
     esac
 }
 
 prepare_cnb_uploads() {
-    local index payload upload_url verify_url
+    local index payload upload_response upload_url verify_url
 
     for index in "$@"; do
         payload="$work_dir/upload-request-$index.json"
+        upload_response="$work_dir/upload-request-response-$index.json"
         jq -n \
             --arg asset_name "${upload_asset_names[$index]}" \
             --argjson size "${upload_asset_sizes[$index]}" \
@@ -77,9 +79,10 @@ prepare_cnb_uploads() {
         cnb_request POST \
             "$api_repo/-/releases/$release_id/asset-upload-url" \
             201 \
-            "$payload"
-        upload_url="$(jq -er '.upload_url' "$response_file")"
-        verify_url="$(jq -er '.verify_url' "$response_file")"
+            "$payload" \
+            "$upload_response"
+        upload_url="$(jq -er '.upload_url' "$upload_response")"
+        verify_url="$(jq -er '.verify_url' "$upload_response")"
         if [[ "$verify_url" != http://* && "$verify_url" != https://* ]]; then
             verify_url="$CNB_API_URL$verify_url"
         fi
@@ -101,51 +104,103 @@ upload_cnb_asset() {
     local upload_url="${upload_urls[$index]}"
     local verify_url="${verify_urls[$index]}"
     local started_at finished_at elapsed upload_metrics upload_status upload_speed verify_status
+    local attempt=1 max_attempts=3 upload_body verify_body
 
     started_at="$(date +%s)"
     echo "[$(date --iso-8601=seconds)] 开始上传 CNB 附件：$asset_name"
-    if ! upload_metrics="$(curl --fail-with-body --silent --show-error \
-        --retry 2 \
-        --retry-all-errors \
-        --connect-timeout 30 \
-        --speed-limit 10240 \
-        --speed-time 120 \
-        --request PUT \
-        --upload-file "$asset_path" \
-        --output "$work_dir/upload-body-$index.txt" \
-        --write-out '%{http_code}\t%{time_total}\t%{speed_upload}' \
-        "$upload_url")"; then
-        echo "上传 CNB 附件失败：$asset_name" >&2
-        return 1
-    fi
-    IFS=$'\t' read -r upload_status _ upload_speed <<< "$upload_metrics"
-    case "$upload_status" in
-        200|201|204) ;;
-        *)
-            echo "上传 CNB 附件失败：$asset_name（HTTP $upload_status）" >&2
+    while :; do
+        upload_url="${upload_urls[$index]}"
+        verify_url="${verify_urls[$index]}"
+        upload_body="$work_dir/upload-body-$index-$attempt.txt"
+        if ! upload_metrics="$(curl --fail-with-body --silent --show-error \
+            --connect-timeout 30 \
+            --speed-limit 10240 \
+            --speed-time 120 \
+            --request PUT \
+            --header 'Content-Type: application/octet-stream' \
+            --header "Content-Length: $asset_size" \
+            --header 'Expect:' \
+            --upload-file "$asset_path" \
+            --output "$upload_body" \
+            --write-out '%{http_code}\t%{time_total}\t%{speed_upload}' \
+            "$upload_url")"; then
+            upload_status="${upload_metrics%%$'\t'*}"
+            echo "上传 CNB 附件失败：$asset_name（HTTP ${upload_status:-连接失败}）" >&2
+            if [[ -s "$upload_body" ]]; then
+                sed -n '1,80p' "$upload_body" >&2
+            fi
+            case "$upload_status" in
+                ''|000|408|429|5??)
+                    if (( attempt < max_attempts )); then
+                        attempt=$((attempt + 1))
+                        echo "将为 $asset_name 重新申请上传地址后重试（$attempt/$max_attempts）" >&2
+                        sleep 2
+                        # CNB 的预签名上传地址是一次性的，重试前必须重新申请。
+                        prepare_cnb_uploads "$index"
+                        continue
+                    fi
+                    ;;
+            esac
             return 1
-            ;;
-    esac
+        fi
+        IFS=$'\t' read -r upload_status _ upload_speed <<< "$upload_metrics"
+        case "$upload_status" in
+            200|201|204) ;;
+            *)
+                echo "上传 CNB 附件失败：$asset_name（HTTP $upload_status）" >&2
+                if [[ -s "$upload_body" ]]; then
+                    sed -n '1,80p' "$upload_body" >&2
+                fi
+                return 1
+                ;;
+        esac
 
-    if ! verify_status="$(curl --silent --show-error \
-        --retry 2 \
-        --retry-all-errors \
-        --connect-timeout 30 \
-        --request POST \
-        --header "$auth_header" \
-        --header "$accept_header" \
-        --output "$work_dir/verify-response-$index.json" \
-        --write-out '%{http_code}' \
-        "$verify_url")"; then
-        echo "校验 CNB 附件失败：$asset_name" >&2
-        return 1
-    fi
-    if [[ "$verify_status" != 200 ]]; then
-        echo "校验 CNB 附件失败：$asset_name（HTTP $verify_status）" >&2
-        jq . "$work_dir/verify-response-$index.json" 2>/dev/null || \
-            sed -n '1,80p' "$work_dir/verify-response-$index.json" >&2
-        return 1
-    fi
+        verify_body="$work_dir/verify-response-$index-$attempt.json"
+        if ! verify_status="$(curl --silent --show-error \
+            --connect-timeout 30 \
+            --request POST \
+            --header "$auth_header" \
+            --header "$accept_header" \
+            --output "$verify_body" \
+            --write-out '%{http_code}' \
+            "$verify_url")"; then
+            echo "校验 CNB 附件失败：$asset_name（HTTP ${verify_status:-连接失败}）" >&2
+            if [[ -s "$verify_body" ]]; then
+                sed -n '1,80p' "$verify_body" >&2
+            fi
+            case "$verify_status" in
+                ''|000|408|429|5??)
+                    if (( attempt < max_attempts )); then
+                        attempt=$((attempt + 1))
+                        echo "将为 $asset_name 重新申请上传地址后重试（$attempt/$max_attempts）" >&2
+                        sleep 2
+                        prepare_cnb_uploads "$index"
+                        continue
+                    fi
+                    ;;
+            esac
+            return 1
+        fi
+        if [[ "$verify_status" != 200 ]]; then
+            echo "校验 CNB 附件失败：$asset_name（HTTP $verify_status）" >&2
+            if ! jq . "$verify_body" 2>/dev/null; then
+                sed -n '1,80p' "$verify_body" >&2
+            fi
+            case "$verify_status" in
+                408|429|5??)
+                    if (( attempt < max_attempts )); then
+                        attempt=$((attempt + 1))
+                        echo "将为 $asset_name 重新申请上传地址后重试（$attempt/$max_attempts）" >&2
+                        sleep 2
+                        prepare_cnb_uploads "$index"
+                        continue
+                    fi
+                    ;;
+            esac
+            return 1
+        fi
+        break
+    done
 
     finished_at="$(date +%s)"
     elapsed=$((finished_at - started_at))
@@ -165,14 +220,34 @@ upload_cnb_asset() {
 upload_cnb_group() {
     local description="$1"
     shift
-    local index pid failed=0
+    local index pid failed=0 batch_size=0
+    local concurrency="${CNB_UPLOAD_CONCURRENCY:-9999}"
     local -a pids=()
 
     [[ "$#" -gt 0 ]] || return 0
-    echo "正在全部并行上传 CNB ${description}（共 $# 个）..."
+    if [[ ! "$concurrency" =~ ^[1-9][0-9]*$ ]]; then
+        echo "CNB_UPLOAD_CONCURRENCY 必须是正整数：$concurrency" >&2
+        return 1
+    fi
+    echo "正在分批并行上传 CNB ${description}（共 $# 个，并发上限 $concurrency）..."
     for index in "$@"; do
         upload_cnb_asset "$index" &
         pids+=("$!")
+        batch_size=$((batch_size + 1))
+        if (( batch_size >= concurrency )); then
+            failed=0
+            for pid in "${pids[@]}"; do
+                if ! wait "$pid"; then
+                    failed=1
+                fi
+            done
+            pids=()
+            batch_size=0
+            if [[ "$failed" -ne 0 ]]; then
+                echo "CNB ${description}上传失败，停止后续批次。" >&2
+                return 1
+            fi
+        fi
     done
     for pid in "${pids[@]}"; do
         if ! wait "$pid"; then
@@ -185,45 +260,67 @@ upload_cnb_group() {
     fi
 }
 
-echo "正在读取 GitHub Release：$RELEASE_TAG"
-github_release_json="$work_dir/github-release.json"
-gh api \
-    "repos/$GITHUB_RELEASE_REPOSITORY/releases/tags/$RELEASE_TAG" \
-    > "$github_release_json"
-
-release_name="$(jq -er '.name // .tag_name' "$github_release_json")"
-release_body="$(jq -r '.body // ""' "$github_release_json")"
-if [[ "${CNB_ROOTFS_LANGUAGE:-}" == zh ]]; then
-    release_name='Droidspaces 全桌面 Wayland RootFS（简体中文）'
-    release_body='仅包含简体中文 RootFS 和 rootfs_zh.json。'
-fi
-release_prerelease="$(jq -r '
-    if (.prerelease | type) == "boolean" then .prerelease
-    else error("prerelease is not a boolean")
-    end
-' "$github_release_json")"
-mapfile -t expected_assets < <(jq -er --arg language "${CNB_ROOTFS_LANGUAGE:-}" '
-    .assets[].name
-    | select(
-        $language != "zh" or
-        endswith("-zh.tar.xz") or
-        . == "rootfs_zh.json"
-      )
-' "$github_release_json")
-if [[ "${#expected_assets[@]}" -eq 0 ]]; then
-    echo "GitHub Release $RELEASE_TAG 没有附件，拒绝创建空的 CNB 镜像。" >&2
-    exit 1
-fi
-
-# 优先复用调用方已经下载好的本地资产，避免再次下载数十 GiB 附件而耗尽运行器磁盘。
-# 只有当本地目录缺少任意一个预期附件时才回退到 gh release download。
-reuse_local_assets=0
+local_assets_dir=''
 if [[ -n "${CNB_LOCAL_ASSETS_DIR:-}" ]]; then
     [[ -d "$CNB_LOCAL_ASSETS_DIR" ]] || {
         echo "本地资产目录不存在：$CNB_LOCAL_ASSETS_DIR" >&2
         exit 1
     }
     local_assets_dir="$(cd "$CNB_LOCAL_ASSETS_DIR" && pwd)"
+    release_name=''
+    release_body=''
+    release_prerelease=false
+    mapfile -t expected_assets < <(
+        find "$local_assets_dir" -maxdepth 1 -type f \
+            \( -name '*-zh.tar.xz' -o -name 'rootfs_zh.json' -o -name 'rootfs.json' \) \
+            -printf '%f\n' | sort
+    )
+    archive_count=0
+    for asset_name in "${expected_assets[@]}"; do
+        [[ "$asset_name" == *-zh.tar.xz ]] && archive_count=$((archive_count + 1))
+    done
+    if [[ "$archive_count" -ne 40 || ! -f "$local_assets_dir/rootfs_zh.json" || ! -f "$local_assets_dir/rootfs.json" ]]; then
+        echo "本地 CNB 资产不完整：需要 40 个中文压缩包及 rootfs_zh.json、rootfs.json。" >&2
+        exit 1
+    fi
+else
+    echo "正在读取 GitHub Release：$RELEASE_TAG"
+    github_release_json="$work_dir/github-release.json"
+    gh api \
+        "repos/$GITHUB_RELEASE_REPOSITORY/releases/tags/$RELEASE_TAG" \
+        > "$github_release_json"
+
+    release_name="$(jq -er '.name // .tag_name' "$github_release_json")"
+    release_body="$(jq -r '.body // ""' "$github_release_json")"
+    release_prerelease="$(jq -r '
+        if (.prerelease | type) == "boolean" then .prerelease
+        else error("prerelease is not a boolean")
+        end
+    ' "$github_release_json")"
+    mapfile -t expected_assets < <(jq -er --arg language "${CNB_ROOTFS_LANGUAGE:-}" '
+        .assets[].name
+        | select(
+            $language != "zh" or
+            endswith("-zh.tar.xz") or
+            . == "rootfs_zh.json" or
+            . == "rootfs.json"
+          )
+    ' "$github_release_json")
+    if [[ "${#expected_assets[@]}" -eq 0 ]]; then
+        echo "GitHub Release $RELEASE_TAG 没有附件，拒绝创建空的 CNB 镜像。" >&2
+        exit 1
+    fi
+fi
+
+if [[ "${CNB_ROOTFS_LANGUAGE:-}" == zh ]]; then
+    release_name='Droidspaces 全桌面 Wayland RootFS（简体中文）'
+    release_body=$'## 简体中文 RootFS\n\n面向 Droidspaces 的 ARM64 滚动 RootFS，提供 Debian 13、Ubuntu 26.04、Fedora 43、Fedora 44 和 Arch Linux 的 Anland Wayland 桌面镜像。\n\n- 覆盖 8 种桌面环境：KDE Plasma、KDE Plasma Mobile、GNOME、Anland Next、Niri、Hyprland、Mango 和 Denial。\n- 共 40 个简体中文 `.tar.xz` 镜像，均面向 ARM64。\n- `rootfs.json` 包含全部中文 RootFS 地址；`rootfs_zh.json` 是订阅清单，包含版本、文件大小、SHA-256 校验值及 CNB 下载地址。\n- 镜像包含 Droidspaces 桌面自动启动配置和高通 Adreno/Mesa 支持。\n\n在 Droidspaces RootFS 管理中添加 `rootfs_zh.json` 即可订阅。本 CNB Release 仅发布简体中文 RootFS，并随每周滚动构建更新。'
+fi
+
+# 优先复用调用方已经下载好的本地资产，避免再次下载数十 GiB 附件而耗尽运行器磁盘。
+# 只有当本地目录缺少任意一个预期附件时才回退到 gh release download。
+reuse_local_assets=0
+if [[ -n "$local_assets_dir" ]]; then
     reuse_local_assets=1
     for asset_name in "${expected_assets[@]}"; do
         if [[ ! -f "$local_assets_dir/$asset_name" ]]; then
@@ -234,7 +331,7 @@ if [[ -n "${CNB_LOCAL_ASSETS_DIR:-}" ]]; then
 fi
 
 if [[ "$reuse_local_assets" -eq 1 ]]; then
-    echo "正在复用本地已下载的 ${#expected_assets[@]} 个 GitHub Release 附件：$local_assets_dir"
+    echo "正在复用本地已准备的 ${#expected_assets[@]} 个 CNB 附件：$local_assets_dir"
     for asset_name in "${expected_assets[@]}"; do
         ln -sfn -- "$local_assets_dir/$asset_name" "$asset_dir/$asset_name"
     done
@@ -262,6 +359,19 @@ if [[ "${CNB_ROOTFS_LANGUAGE:-}" == zh ]]; then
         'map(.download_url = ($base + "/" + (.file + ".tar.xz")))' \
         "$manifest" > "$manifest.tmp"
     mv "$manifest.tmp" "$manifest"
+    jq . "$manifest" > "$asset_dir/rootfs.json.tmp"
+    mv "$asset_dir/rootfs.json.tmp" "$asset_dir/rootfs.json"
+    release_build_id="${BUILD_ID:-$(jq -er '.[0].version' "$manifest")}"
+    release_build_time="${BUILD_TIME:-$(jq -er '.[0].build_date' "$manifest")}"
+    release_body+=$'\n\n### 构建信息\n\n'
+    release_body+="- 构建标识：$release_build_id"$'\n'
+    release_body+="- 构建时间（UTC）：$release_build_time"$'\n'
+    release_body+='- 滚动标签：'"$RELEASE_TAG"$'\n'
+    release_body+='- 架构：ARM64；镜像数量：40 个简体中文 RootFS。'
+    release_body+=$'\n\n### 全部 RootFS 地址索引\n\n'
+    release_body+="[rootfs.json](https://cnb.cool/$CNB_RELEASE_REPOSITORY/-/releases/download/$RELEASE_TAG/rootfs.json) — 全部 40 个简体中文 RootFS 的下载地址。"
+    release_body+=$'\n\n'
+    release_body+="[rootfs_zh.json](https://cnb.cool/$CNB_RELEASE_REPOSITORY/-/releases/download/$RELEASE_TAG/rootfs_zh.json) — Droidspaces 中文订阅清单。"
 fi
 
 cnb_request GET "$api_repo/-/releases/tags/$RELEASE_TAG" '200,404'
@@ -305,7 +415,7 @@ for asset_name in "${expected_assets[@]}"; do
     upload_asset_paths[$upload_index]="$asset_path"
     upload_asset_sizes[$upload_index]="$asset_size"
     case "$asset_name" in
-        *-manifest|SHA256SUMS|SHA256SUMS.*)
+        rootfs.json|rootfs_zh.json|rootfs_en.json|*-manifest|SHA256SUMS|SHA256SUMS.*)
             manifest_upload_indexes+=("$upload_index")
             ;;
         *)
